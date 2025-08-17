@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "WebSocket Client Extension",
+  "version": "1.0",
+  "description": "Connects to a WebSocket server and relays messages.",
+  "permissions": [
+    "cookies",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

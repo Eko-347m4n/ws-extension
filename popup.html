@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WS Client</title>
+  <style>
+    body { font-family: sans-serif; width: 450px; padding: 0; margin: 0; }
+    h3 { margin: 10px; font-size: 14px; }
+    #controls-container { background-color: #e8f0fe; border-bottom: 1px solid #ccc; padding: 10px; }
+    .control-row { display: flex; justify-content: space-between; align-items: center; }
+    .control-row:not(:last-child) { margin-bottom: 10px; }
+    #config { display: flex; align-items: center; background-color: #f5f5f5; border-bottom: 1px solid #ccc; padding: 10px; }
+    #config label { width: 100px; font-size: 12px; }
+    #config input { flex-grow: 1; }
+    #config.disabled { opacity: 0.5; pointer-events: none; }
+    #discovered-container { border-bottom: 1px solid #ccc; max-height: 200px; overflow-y: auto; }
+    .discovered-item { display: flex; justify-content: space-between; align-items: center; padding: 5px; border-bottom: 1px solid #eee; font-size: 12px; }
+    .discovered-item:last-child { border-bottom: none; }
+    .discovered-item .url { word-break: break-all; margin-right: 10px; }
+    .discovered-item button { flex-shrink: 0; }
+    #status-container { padding: 5px 10px; background-color: #f5f5f5; border-bottom: 1px solid #ccc; font-size: 12px; }
+    #status { font-weight: bold; }
+    #connection-log { padding: 10px; }
+    #messages { height: 150px; overflow-y: scroll; padding: 5px; background-color: #fff; border: 1px solid #ccc; }
+    #send-container { display: flex; padding-top: 10px; }
+    #message-input { flex-grow: 1; }
+    /* Toggle Switch CSS */
+    .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 20px; }
+    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: white; transition: .4s; border-radius: 50%; }
+    input:checked + .slider { background-color: #2196F3; }
+    input:checked + .slider:before { transform: translateX(20px); }
+  </style>
+</head>
+<body>
+
+  <div id="controls-container">
+      <div class="control-row">
+        <label for="capture-toggle"><b>1. Start Capture</b></label>
+        <label class="switch">
+          <input type="checkbox" id="capture-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="control-row">
+        <label for="auto-connect-toggle"><b>2. Auto-Connect</b></label>
+        <label class="switch">
+          <input type="checkbox" id="auto-connect-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+  </div>
+
+  <div id="config">
+      <label for="cookie-name">Cookie Name:</label>
+      <input type="text" id="cookie-name" placeholder="(auto-detected in auto-connect mode)">
+  </div>
+
+  <div id="discovered-container">
+      <h3>Discovered WebSockets:</h3>
+      <div id="discovered-list"></div>
+  </div>
+
+  <div id="status-container">Status: <span id="status">Disconnected</span> <button id="disconnect-button" style="float: right;">Disconnect</button></div>
+
+  <div id="connection-log">
+      <h3>Connection Log:</h3>
+      <div id="messages"></div>
+      <div id="send-container">
+          <input type="text" id="message-input" placeholder="Type a message...">
+          <button id="send-button">Send</button>
+      </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
