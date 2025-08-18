@@ -1,0 +1,15 @@
+{
+  "name": "ws-client-desktop",
+  "version": "1.0.0",
+  "description": "Desktop client for WebSocket Extension",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox"
+  },
+  "dependencies": {
+    "electron-log": "^5.1.2"
+  },
+  "devDependencies": {
+    "electron": "^29.1.5"
+  }
+}

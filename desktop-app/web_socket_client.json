@@ -1,0 +1,9 @@
+{
+  "name": "org.gemini.web_socket_client",
+  "description": "WebSocket Client Native Host",
+  "path": "/home/b47m4n/ekstensi chrome/ws-extension/desktop-app/run_host.sh",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://pbbapjkoedghdpooiojichiceahoeoml/"
+  ]
+}
