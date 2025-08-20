@@ -16,6 +16,28 @@
       --button-hover-bg: #005f9e;
       --scrollbar-thumb: #555;
       --scrollbar-track: var(--background-color);
+      --status-connected: #28a745;
+      --status-disconnected: #dc3545;
+      --status-waiting: #ffc107;
+    }
+    #connection-status {
+      margin-left: 15px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: bold;
+    }
+    .status-connected {
+      background-color: var(--status-connected);
+      color: white;
+    }
+    .status-disconnected {
+      background-color: var(--status-disconnected);
+      color: white;
+    }
+    .status-waiting {
+      background-color: var(--status-waiting);
+      color: #111;
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -123,6 +145,7 @@
 <body>
   <div class="toolbar">
     <h1>WebSocket Log</h1>
+    <span id="connection-status"></span>
     <div class="controls">
       <button id="clear-log-btn">Clear Log</button>
       <label>

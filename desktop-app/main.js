@@ -12,6 +12,33 @@ log.transports.file.resolvePathFn = () => path.join(app.getPath('userData'), 'lo
 log.info('App starting...');
 
 let mainWindow;
+let connectionState = 'waiting'; // states: waiting, connected, disconnected, terminated
+let watchdogTimer = null;
+
+/**
+ * Updates the connection state and notifies the renderer process.
+ * @param {string} newState The new connection state.
+ */
+function updateConnectionState(newState) {
+  if (connectionState === newState) return;
+
+  connectionState = newState;
+  log.info(`Connection state changed to: ${newState}`);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('connection-status-changed', newState);
+  }
+}
+
+/**
+ * Resets the 5-second watchdog timer. If it fires, state becomes 'disconnected'.
+ */
+function resetWatchdogTimer() {
+  clearTimeout(watchdogTimer);
+  updateConnectionState('connected');
+  watchdogTimer = setTimeout(() => {
+    updateConnectionState('disconnected');
+  }, 5000); // 5 seconds
+}
 
 /**
  * Creates and loads the main application window.
@@ -66,12 +93,17 @@ app.whenReady().then(() => {
   // Signal to the extension that the native host is ready.
   sendToChrome({ status: 'ready' });
 
+  // Set initial state
+  updateConnectionState('waiting');
+
   // --- Native Messaging Handlers ---
 
   // Buffer to store incoming data from Chrome.
   let messageBuffer = Buffer.alloc(0);
 
   process.stdin.on('data', (chunk) => {
+    resetWatchdogTimer(); // Reset timer on any incoming data
+
     log.info(`Received data chunk of length: ${chunk.length}`);
     messageBuffer = Buffer.concat([messageBuffer, chunk]);
 
@@ -112,6 +144,8 @@ app.whenReady().then(() => {
 
   process.stdin.on('end', () => {
     log.info('Stdin stream ended. Quitting app.');
+    clearTimeout(watchdogTimer);
+    updateConnectionState('terminated');
     app.quit();
   });
 });
