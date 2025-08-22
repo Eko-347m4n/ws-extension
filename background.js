@@ -1,24 +1,25 @@
-/**
- * Background service worker for the WebSocket Client Extension.
- * Handles network requests, WebSocket connections, and communication with the native desktop app.
- */
+importScripts('statistics.js', 'performance.js', 'strategy.js');
 
-let ws; // Holds the WebSocket object
-let config; // Stores connection configuration (URLs, cookie name)
-let reconnectTimeout; // Timeout ID for reconnection logic
-let isCapturing = false; // Flag for whether the extension is capturing network requests
-let autoConnectMode = false; // Flag for auto-connection feature
-let discoveredUrls = []; // Stores discovered WebSocket URLs for the session
-let nativePort = null; // Holds the connection port to the native desktop app
+// --- Global State ---
+let ws;
+let config;
+let reconnectTimeout;
+let isCapturing = false;
+let autoConnectMode = false;
+let discoveredUrls = [];
+let nativePort = null;
 
+// --- State Management ---
+let shoeStates = {};
+let globalPriors = {};
+const SHRINKAGE_FACTOR = 0.2;
 const COMMON_COOKIE_NAMES = ['session', 'sess', 'sid', 'token', 'auth', 'jwt', 'id'];
 
-/**
- * Establishes a connection to the native messaging host (desktop app).
- */
+// --- Core Functions ---
+
 function connectNative() {
     const hostName = "org.gemini.web_socket_client";
-    console.log(`Connecting to native host: ${hostName}`);
+    console.log(`Attempting to connect to native host: ${hostName}`);
     nativePort = chrome.runtime.connectNative(hostName);
 
     if (chrome.runtime.lastError) {
@@ -35,64 +36,70 @@ function connectNative() {
         if (chrome.runtime.lastError) {
             console.error("Native host disconnected with error:", chrome.runtime.lastError.message);
         } else {
-            console.log("Native host disconnected.");
+            console.log("Native host disconnected gracefully.");
         }
-        nativePort = null;
+        nativePort = null; // Essential for reconnection logic
     });
+    console.log("Successfully connected to native host.");
 }
 
-/**
- * Sends a message to the popup. Fails silently if the popup is not open.
- * @param {object} message The message to send.
- */
 function sendMessageToPopup(message) {
     chrome.runtime.sendMessage(message).catch(e => {
-        // Ignore "Receiving end does not exist" error, which is expected if popup is closed.
         if (!e.message.includes("Receiving end does not exist")) console.error(e);
     });
 }
 
-/**
- * Updates the status in the popup and the badge text.
- * @param {string} status The status text to display.
- * @param {string} color The color for the badge background.
- */
+function sendToNativeHost(message) {
+    // If port is not connected, try to reconnect it first.
+    if (!nativePort) {
+        console.log("Native port is not connected. Attempting to reconnect...");
+        connectNative();
+    }
+
+    // If the connection attempt was successful (or already was connected), send the message.
+    if (nativePort) {
+        try {
+            nativePort.postMessage(message);
+        } catch (e) {
+            console.error("Failed to send message to native host:", e);
+            // The port might have broken between the check and the postMessage call.
+            // Disconnect it fully to ensure the next call triggers a reconnect.
+            nativePort.disconnect();
+            nativePort = null;
+        }
+    } else {
+        console.error("Cannot send message: Native host connection is not available.");
+    }
+}
+
 function updateStatus(status, color) {
   sendMessageToPopup({ type: "STATUS_UPDATE", status, color });
   chrome.action.setBadgeText({ text: status.substring(0, 4) }).catch(e => {});
   chrome.action.setBadgeBackgroundColor({ color: color || '#777777' }).catch(e => {});
 }
 
-/**
- * Disconnects the WebSocket and the native messaging port.
- */
 function disconnect() {
   if (reconnectTimeout) clearTimeout(reconnectTimeout);
   reconnectTimeout = null;
-  if (ws) ws.close();
-  else updateStatus("Disconnected", "#db4437");
-  if (nativePort) {
-      nativePort.disconnect();
+  if (ws) {
+      ws.onclose = null; // Prevent reconnect logic from firing on manual disconnect
+      ws.close();
+      ws = null;
   }
+  if (nativePort) nativePort.disconnect();
+  updateStatus("Disconnected", "#db4437");
 }
 
-/**
- * Main function to connect to the WebSocket server using the stored config.
- */
 function connect() {
   if (ws) return;
   if (reconnectTimeout) clearTimeout(reconnectTimeout);
   if (!config) { updateStatus("Config?", "#f4b400"); return; }
 
-  // Establish connection to the desktop app when a WebSocket connection is initiated.
   connectNative();
-
-  console.log("Attempting to connect with config:", config);
   updateStatus("Connecting...", "#4285f4");
 
   chrome.cookies.get({ url: config.targetUrl, name: config.cookieName }, (cookie) => {
     if (cookie) {
-      console.log("Cookie found. Connecting to WebSocket...");
       ws = new WebSocket(config.wsUrl);
 
       ws.onopen = () => {
@@ -100,24 +107,25 @@ function connect() {
       };
 
       ws.onmessage = (event) => {
+        console.log(`[${new Date().toISOString()}] Received raw WebSocket message.`);
         let data;
         try {
             data = JSON.parse(event.data);
         } catch (e) {
-            return; // Ignore non-JSON messages
+            console.error(`[${new Date().toISOString()}] Failed to parse WebSocket message:`, e);
+            sendMessageToPopup({ type: "WS_MSG", data: event.data });
+            return;
         }
 
-        // Filter messages: only process if args contains a key with 'bac'.
-        if (data && typeof data.args === 'object' && data.args !== null) {
-            const keys = Object.keys(data.args);
-            const hasBacKey = keys.some(key => key.toLowerCase().includes('bac'));
-            if (hasBacKey) {
-                // Relay message to both the popup and the native desktop app.
-                sendMessageToPopup({ type: "WS_MSG", data: data });
-                if (nativePort) {
-                    nativePort.postMessage(data);
-                } else {
-                    console.error("Cannot send message, native port is not connected.");
+        sendMessageToPopup({ type: "WS_MSG", data: data });
+
+        if (data && typeof data.args === 'object') {
+            console.log(`[${new Date().toISOString()}] Message contains 'args' object. Processing tables.`);
+            for (const tableId in data.args) {
+                const tableData = data.args[tableId];
+                if (tableId.toLowerCase().includes('bac') && tableData && Array.isArray(tableData.results)) {
+                    console.log(`[${new Date().toISOString()}] Found Baccarat data for table: ${tableId}`);
+                    processBaccaratData(tableId, tableData);
                 }
             }
         }
@@ -126,10 +134,16 @@ function connect() {
       ws.onclose = () => {
         ws = null;
         if (nativePort) nativePort.disconnect();
-        if (config) { updateStatus("Reconnecting", "#f4b400"); reconnectTimeout = setTimeout(connect, 5000); }
+        if (config) { 
+            updateStatus("Reconnecting", "#f4b400"); 
+            reconnectTimeout = setTimeout(connect, 5000); 
+        }
       };
 
-      ws.onerror = (error) => { console.error("WebSocket error:", error); updateStatus("Error", "#db4437"); };
+      ws.onerror = (error) => { 
+          console.error("WebSocket error:", error); 
+          updateStatus("Error", "#db4437"); 
+      };
     } else {
       console.error(`Cookie '${config.cookieName}' not found for domain '${config.targetUrl}'.`);
       updateStatus("No Cookie", "#f4b400");
@@ -138,59 +152,97 @@ function connect() {
   });
 }
 
-/**
- * Attempts to automatically connect to a discovered WebSocket.
- * It intelligently searches for a common session cookie on the target domain.
- * @param {object} urlData Contains wsUrl and origin of the discovered WebSocket.
- */
+function processBaccaratData(tableId, tableData) {
+    const startTime = performance.now();
+    console.log(`[${new Date().toISOString()}] [${tableId}] Starting processing.`);
+
+    const results = tableData.results;
+    if (!results || !Array.isArray(results) || results.length === 0) {
+        console.log(`[${new Date().toISOString()}] [${tableId}] No results to process.`);
+        return; // Nothing to process
+    }
+
+    // To prevent getting stuck, this function treats each message as the current source of truth.
+    // It re-processes the entire list of results provided in the message each time.
+    // This is more robust against non-cumulative updates from the server.
+
+    const prior = globalPriors[tableId] || { B: 1, P: 1, T: 1 };
+    const tempStrategy = new BaccaratStrategy({ initial_prior: prior });
+    const tempTracker = new PerformanceTracker();
+    let lastDecisionLog = null;
+
+    // Process every outcome in the received list to rebuild the current state from scratch.
+    for (const resultObject of results) {
+        const outcome = translateOutcome(resultObject);
+        if (outcome) {
+            lastDecisionLog = tempStrategy.addOutcome(outcome);
+            tempTracker.recordDecision(lastDecisionLog, outcome);
+        }
+    }
+
+    // Detect a new shoe by checking if the new round count is less than our stored one.
+    if (shoeStates[tableId] && tempStrategy.round < shoeStates[tableId].strategy.round) {
+        console.log(`[${new Date().toISOString()}] [${tableId}] New shoe detected.`);
+        const summary = shoeStates[tableId].performanceTracker.getSummary();
+        sendToNativeHost({ type: 'shoe_summary', payload: summary });
+        const final_counts = shoeStates[tableId].strategy.counts;
+        // Update the global prior for the *next* shoe.
+        globalPriors[tableId] = { B: 1 + (final_counts.B * SHRINKAGE_FACTOR), P: 1 + (final_counts.P * SHRINKAGE_FACTOR), T: 1 + (final_counts.T * SHRINKAGE_FACTOR) };
+    }
+
+    // Persist the newly calculated state for this table.
+    shoeStates[tableId] = {
+        strategy: tempStrategy,
+        performanceTracker: tempTracker
+    };
+
+    // Send the latest state to the UI, if any processing occurred.
+    if (lastDecisionLog) {
+        const payload = { ...lastDecisionLog, tableId };
+        console.log(`[${new Date().toISOString()}] [${tableId}] Sending strategy update to native host.`);
+        sendToNativeHost({ type: 'strategy_update', payload });
+    }
+    const endTime = performance.now();
+    console.log(`[${new Date().toISOString()}] [${tableId}] Finished processing in ${endTime - startTime}ms.`);
+}
+
+function translateOutcome(resultObject) {
+    if (!resultObject) return null;
+    if (resultObject.ties) return 'T';
+    if (resultObject.c === 'R') return 'B';
+    if (resultObject.c === 'B') return 'P';
+    return null;
+}
+
 function initiateAutoConnection(urlData) {
     const httpOrigin = urlData.origin.replace(/^ws/, 'http');
     let hostname = new URL(httpOrigin).hostname;
-
-    // Cookies are often set on the root domain, not a 'ws' subdomain.
     if (hostname.startsWith('ws.') || hostname.startsWith('wss.')) {
         hostname = hostname.substring(hostname.indexOf('.') + 1);
     }
-
-    console.log(`Auto-Connect: Searching for cookies on domain '${hostname}'`);
     chrome.cookies.getAll({ domain: hostname }, (cookies) => {
         if (!cookies || cookies.length === 0) {
-            console.error(`Auto-Connect: No cookies found for domain '${hostname}'`);
             updateStatus("No Cookies", "#f4b400");
             return;
         }
-        let foundCookie = null;
-        for (const name of COMMON_COOKIE_NAMES) {
-            foundCookie = cookies.find(c => c.name.toLowerCase().includes(name));
-            if (foundCookie) break;
-        }
+        let foundCookie = COMMON_COOKIE_NAMES.map(name => cookies.find(c => c.name.toLowerCase().includes(name))).find(c => c);
         if (!foundCookie) {
-            console.error("Auto-Connect: Could not find a likely session cookie on domain:", hostname, cookies);
             updateStatus("No Cookie?", "#f4b400");
             return;
         }
-        console.log("Auto-Connect: Found likely cookie:", foundCookie.name);
         sendMessageToPopup({ type: "AUTO_CONNECT_UPDATE", data: { cookieName: foundCookie.name } });
         config = { wsUrl: urlData.wsUrl, targetUrl: httpOrigin, cookieName: foundCookie.name };
         connect();
     });
 }
 
-/**
- * Listens for network headers and discovers WebSocket upgrade requests.
- * @param {object} details Details of the web request.
- */
 function onHeadersReceived(details) {
-  // 101 is the status code for "Switching Protocols" (a WebSocket upgrade).
   if (details.statusCode === 101) {
     const urlData = { wsUrl: details.url.replace(/^http/, 'ws'), origin: new URL(details.url).origin };
     if (!discoveredUrls.some(item => item.wsUrl === urlData.wsUrl)) {
-        console.log('WebSocket upgrade discovered:', urlData);
         discoveredUrls.push(urlData);
         sendMessageToPopup({ type: "WEBSOCKET_DISCOVERED", data: urlData });
-        if (autoConnectMode && !ws) {
-            initiateAutoConnection(urlData);
-        }
+        if (autoConnectMode && !ws) initiateAutoConnection(urlData);
     }
   }
 }
@@ -210,10 +262,7 @@ function stopCapture() {
   if (!ws) updateStatus("Disconnected", "#db4437");
 }
 
-// --- Event Listeners ---
-
-// Listen for messages from the popup.
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message) => {
   switch (message.type) {
     case "CONNECT": if (ws) disconnect(); config = message.data; connect(); break;
     case "DISCONNECT": config = null; disconnect(); break;
@@ -221,7 +270,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case "GET_STATUS":
       if (isCapturing) updateStatus("Capturing...", "#ff6d00");
       else if (ws && ws.readyState === WebSocket.OPEN) updateStatus("Connected", "#0f9d58");
-      else if (config) updateStatus("Connecting...", "#4285f4");
+      else if (config) updateStatus("Connecting...", "#f4b400");
       else updateStatus("Disconnected", "#db4437");
       break;
     case "START_CAPTURE": startCapture(); break;
@@ -231,7 +280,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// Initialize the extension state on startup or installation.
 function initialize() {
   chrome.storage.local.get(['captureMode', 'autoConnectMode'], (result) => {
     autoConnectMode = !!result.autoConnectMode;

@@ -2,47 +2,25 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>WebSocket Log</title>
+  <title>Baccarat Strategy Dashboard</title>
   <style>
     :root {
-      --background-color: #1e1e1e;
+      --bg-color: #1e1e1e;
       --text-color: #d4d4d4;
-      --primary-color: #007acc;
       --container-bg: #252526;
-      --border-color: #333333;
-      --pre-bg: #1a1a1a;
+      --border-color: #3e3e42;
       --header-bg: #333333;
-      --button-bg: #007acc;
-      --button-hover-bg: #005f9e;
-      --scrollbar-thumb: #555;
-      --scrollbar-track: var(--background-color);
-      --status-connected: #28a745;
-      --status-disconnected: #dc3545;
-      --status-waiting: #ffc107;
-    }
-    #connection-status {
-      margin-left: 15px;
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 12px;
-      font-weight: bold;
-    }
-    .status-connected {
-      background-color: var(--status-connected);
-      color: white;
-    }
-    .status-disconnected {
-      background-color: var(--status-disconnected);
-      color: white;
-    }
-    .status-waiting {
-      background-color: var(--status-waiting);
-      color: #111;
+      --card-bg: #2a2d2e;
+      --bet-banker-color: #e53935; /* Red */
+      --bet-player-color: #1e88e5; /* Blue */
+      --action-bet-color: #2e7d32;   /* Darker Green */
+      --action-nobet-color: #c62828; /* Darker Red */
+      --action-blocked-color: #ff8f00; /* Amber */
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       margin: 0;
-      background-color: var(--background-color);
+      background-color: var(--bg-color);
       color: var(--text-color);
       font-size: 14px;
       display: flex;
@@ -57,104 +35,106 @@
       border-bottom: 1px solid var(--border-color);
       flex-shrink: 0;
     }
-    .toolbar h1 {
-      font-size: 18px;
-      margin: 0;
-      margin-right: auto;
-    }
-    .toolbar .controls label {
-      margin-left: 15px;
-      cursor: pointer;
-      user-select: none;
-    }
-    .toolbar .controls button {
-      margin-left: 15px;
-      padding: 5px 10px;
+    .toolbar h1 { font-size: 18px; margin: 0; margin-right: auto; }
+    #connection-status {
+      padding: 4px 8px;
+      border-radius: 4px;
       font-size: 12px;
-      background-color: var(--button-bg);
-      color: white;
-      border: none;
-      border-radius: 3px;
-      cursor: pointer;
+      font-weight: bold;
     }
-    .toolbar .controls button:hover {
-      background-color: var(--button-hover-bg);
-    }
+    .status-connected { background-color: var(--action-bet-color); color: white; }
+    .status-disconnected { background-color: var(--action-nobet-color); color: white; }
+    .status-waiting { background-color: var(--action-blocked-color); color: #111; }
     #log-container {
       background-color: var(--container-bg);
       flex-grow: 1;
       overflow-y: auto;
       padding: 10px;
     }
-    .log-entry {
+    .card {
+      background-color: var(--card-bg);
       border: 1px solid var(--border-color);
-      border-radius: 5px;
-      margin-bottom: 10px;
-      background-color: var(--background-color);
+      border-radius: 8px;
+      margin-bottom: 12px;
+      font-size: 14px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
-    .log-header {
+    .card-header {
       display: flex;
       justify-content: space-between;
-      align-items: center;
-      padding: 8px 12px;
-      background-color: var(--header-bg);
-      font-size: 12px;
+      padding: 10px 15px;
+      background-color: #3c3c3c;
       border-bottom: 1px solid var(--border-color);
-    }
-    .log-header .timestamp {
       font-family: monospace;
-    }
-    .log-header .copy-btn {
-      padding: 3px 8px;
-      font-size: 11px;
-      background-color: #444;
-      color: var(--text-color);
-      border: 1px solid #555;
-      border-radius: 3px;
-      cursor: pointer;
-    }
-    .log-header .copy-btn:hover {
-      background-color: #555;
-    }
-    .log-body pre {
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      background-color: var(--pre-bg);
-      padding: 12px;
-      margin: 0;
-      color: #9cdcfe; /* Light blue for JSON content */
       font-size: 13px;
-      border-radius: 0 0 4px 4px;
+      border-radius: 8px 8px 0 0;
     }
-    /* Custom Scrollbar */
-    ::-webkit-scrollbar {
-      width: 10px;
+    .card-body {
+      padding: 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
     }
-    ::-webkit-scrollbar-track {
-      background: var(--scrollbar-track);
+    .card-action {
+      font-size: 1.8em;
+      font-weight: bold;
+      padding: 16px;
+      border-radius: 6px;
+      text-align: center;
     }
-    ::-webkit-scrollbar-thumb {
-      background: var(--scrollbar-thumb);
-      border-radius: 5px;
+    .card-action.bet-yes { background-color: var(--action-bet-color); color: white; }
+    .card-action.bet-no { background-color: var(--action-nobet-color); color: white; }
+    .card-action.bet-blocked { background-color: var(--action-blocked-color); color: #111; }
+    .bet-banker { color: var(--bet-banker-color); font-weight: 900; }
+    .bet-player { color: var(--bet-player-color); font-weight: 900; }
+    .metric {
+      display: grid;
+      grid-template-columns: 100px 1fr 100px;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
     }
-    ::-webkit-scrollbar-thumb:hover {
-      background: #6a6a6a;
+    .progress-bar {
+      height: 14px;
+      background-color: #444;
+      border-radius: 7px;
+      overflow: hidden;
+      border: 1px solid #555;
     }
+    .progress-bar-inner {
+      height: 100%;
+      transition: width 0.3s ease-in-out;
+      border-radius: 7px 0 0 7px;
+    }
+    .details-toggle {
+      cursor: pointer;
+      color: #80aaff;
+      text-align: center;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-color);
+      margin-top: 10px;
+      font-size: 12px;
+    }
+    .details-panel {
+      display: none; /* Hidden by default */
+      margin-top: 12px;
+      padding: 12px;
+      background-color: #1e1e1e;
+      border-radius: 4px;
+    }
+    .details-panel.show { display: block; }
+    .details-panel .stat { margin-bottom: 5px; font-family: monospace; font-size: 12px; }
+    .details-panel .stat strong { color: #d4d4d4; min-width: 150px; display: inline-block; }
   </style>
 </head>
 <body>
   <div class="toolbar">
-    <h1>WebSocket Log</h1>
+    <h1>Baccarat Dashboard</h1>
     <span id="connection-status"></span>
-    <div class="controls">
-      <button id="clear-log-btn">Clear Log</button>
-      <label>
-        <input type="checkbox" id="autoscroll-toggle" checked> Auto-Scroll
-      </label>
-    </div>
   </div>
   <div id="log-container">
-    <!-- Log entries will be injected here -->
+    <!-- Dashboard cards will be injected here -->
   </div>
+  <script src="./renderer.js"></script>
 </body>
 </html>

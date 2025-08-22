@@ -1,246 +1,150 @@
 /**
  * Renderer process script for the Electron desktop app window.
- * This script runs in the context of the web page (index.html).
- * It listens for messages from the main process and displays them in the log container.
+ * This script builds and manages the dashboard UI.
  */
-const { ipcRenderer } = require('electron');
+
+// --- DOM Elements ---
+const logContainer = document.getElementById('log-container');
+const connectionStatusSpan = document.getElementById('connection-status');
 
 /**
- * Parses WebSocket responses to extract structured Baccarat game results.
- * @param {string} jsonString The raw JSON string from the WebSocket.
- * @returns {object|null} A structured object with results or null if not applicable.
+ * Creates or updates a dashboard card for a specific table.
+ * @param {object} logData The comprehensive log data from the strategy.
  */
-function processWebSocketResponse(jsonString) {
-  try {
-    const data = JSON.parse(jsonString);
+function createOrUpdateDashboardCard(logData) {
+    const { tableId, round, outcome, confidence, net_profit, decision, analysis } = logData;
+    if (!tableId) return;
 
-    if (data.type !== 'lobby.historyUpdated') {
-      return null;
+    const cardId = 'table-' + tableId;
+    let card = document.getElementById(cardId);
+
+    // If a card for this table doesn't exist, create it at the bottom.
+    if (!card) {
+        card = document.createElement('div');
+        card.id = cardId;
+        card.className = 'card';
+        logContainer.appendChild(card); // ALWAYS APPEND TO THE BOTTOM
     }
 
-    const args = data.args;
-    const tableName = Object.keys(args)[0];
-    const history = args[tableName];
+    // --- Determine UI states ---
+    const confidenceValue = confidence * 100;
+    const isBet = decision.stake > 0;
+    const isBlocked = !isBet && (decision.reason !== 'Confidence too low');
 
-    if (!tableName || !history || !history.results) {
-      return null;
-    }
+    let actionClass, actionText, riskText, riskIcon;
+    let betOnSide = decision.betOn === 'B' ? 'BANKER' : 'PLAYER';
+    let betOnColorClass = decision.betOn === 'B' ? 'bet-banker' : 'bet-player';
 
-    const rawResults = history.results;
-    let processedResults = [];
-
-    if (rawResults.length === 0) {
-      processedResults = [];
-    } else if (typeof rawResults[0] === 'string') {
-      processedResults = rawResults.map(result => {
-        if (result === 'Player') return 'Player';
-        if (result === 'Banker') return 'Banker';
-        return 'Tie';
-      });
-    } else if (typeof rawResults[0] === 'object' && rawResults[0] !== null) {
-      processedResults = rawResults.map(result => {
-        if (result.ties) return 'Tie';
-        if (result.c === 'R') return 'Banker';
-        if (result.c === 'B') return 'Player';
-        return 'Unknown';
-      });
+    if (isBet) {
+        actionClass = 'bet-yes';
+        actionText = `🟢 BET <span class="${betOnColorClass}">${betOnSide}</span> (${decision.stake} units)`;
+    } else if (isBlocked) {
+        actionClass = 'bet-blocked';
+        actionText = `🟡 NO BET – ${decision.reason}`;
     } else {
-      return null; // Not a format we can process
+        actionClass = 'bet-no';
+        actionText = `🔴 NO BET – ${decision.reason}`;
     }
 
-    return {
-      tableName: tableName,
-      totalRounds: processedResults.length,
-      results: processedResults
-    };
+    if (decision.reason.includes('exposure') || decision.reason.includes('STOP')) {
+        riskIcon = '❌';
+        riskText = decision.reason;
+    } else {
+        riskIcon = '✅';
+        riskText = 'Exposure OK';
+    }
 
-  } catch (error) {
-    // This isn't a fatal error, just means we can't parse this specific message.
-    return null;
-  }
+    let confidenceCategory, confidenceColor;
+    if (confidenceValue >= 95) { confidenceCategory = 'Strong'; confidenceColor = '#4caf50'; }
+    else if (confidenceValue >= 90) { confidenceCategory = 'High'; confidenceColor = '#ffeb3b'; }
+    else if (confidenceValue >= 80) { confidenceCategory = 'Medium'; confidenceColor = '#ff9800'; }
+    else { confidenceCategory = 'Low'; confidenceColor = '#f44336'; }
+
+    // --- Build Card HTML from Wireframe ---
+    card.innerHTML = `
+        <div class="card-header">
+            <span>ROUND: ${round}</span>
+            <span>TABLE: ${tableId}</span>
+        </div>
+        <div class="card-body">
+            <div class="card-action ${actionClass}">${actionText}</div>
+            <div class="metric">
+                <span>Confidence</span>
+                <div class="progress-bar">
+                    <div class="progress-bar-inner" style="width: ${confidenceValue}%; background-color: ${confidenceColor};"></div>
+                </div>
+                <span style="color: ${confidenceColor}; font-weight: bold;">${confidenceValue.toFixed(1)}%</span>
+            </div>
+            <div class="metric">
+                <span>Risk Status</span>
+                <span>${riskIcon} ${riskText}</span>
+                <span></span>
+            </div>
+            <div class="details-toggle" onclick="toggleDetails('${tableId}')">Show Details ▼</div>
+            <div class="details-panel" id="details-${tableId}">
+                <div class="stat"><strong>Last Outcome:</strong> ${outcome}</div>
+                <div class="stat"><strong>Net Profit:</strong> ${net_profit.toFixed(2)} units</div>
+                <div class="stat"><strong>Strict Signal:</strong> ${analysis.strict_signal ? 'YES' : 'NO'}</div>
+                <div class="stat"><strong>SPRT Decision:</strong> ${analysis.sprt_state.decision}</div>
+                <div class="stat"><strong>CUSUM Sum:</strong> ${analysis.cusum_sum.toFixed(2)}</div>
+                <div class="stat"><strong>P(B*):</strong> ${logData.p_b_star.toFixed(3)}</div>
+                <div class="stat"><strong>Posterior Mean (B):</strong> ${logData.posterior_mean.B.toFixed(3)}</div>
+            </div>
+        </div>
+    `;
 }
 
 /**
- * Creates a DOM element for displaying a structured game result.
- * @param {object} structuredData The processed data from processWebSocketResponse.
- * @param {object} rawMessage The original raw message for the collapsible view.
- * @returns {HTMLElement} The log body element.
+ * Toggles the visibility of the details panel for a card.
+ * @param {string} tableId The ID of the table to toggle.
  */
-function createStructuredLogBody(structuredData, rawMessage) {
-    const logBody = document.createElement('div');
-    logBody.className = 'log-body';
-
-    // Add structured data view
-    const structuredView = document.createElement('div');
-    structuredView.style.padding = '12px';
-    structuredView.style.backgroundColor = '#1a1a1a';
-
-    const title = document.createElement('h4');
-    title.textContent = `Table: ${structuredData.tableName}`;
-    title.style.margin = '0 0 10px 0';
-    title.style.color = '#00aaff';
-
-    const rounds = document.createElement('p');
-    rounds.textContent = `Total Rounds: ${structuredData.totalRounds}`;
-    rounds.style.margin = '0 0 10px 0';
-    rounds.style.fontSize = '12px';
-
-    const resultsContainer = document.createElement('div');
-    resultsContainer.style.display = 'flex';
-    resultsContainer.style.flexWrap = 'wrap';
-    resultsContainer.style.gap = '5px';
-
-    structuredData.results.forEach(result => {
-        const resultChip = document.createElement('span');
-        resultChip.textContent = result.charAt(0); // B, P, or T
-        resultChip.style.display = 'inline-block';
-        resultChip.style.width = '20px';
-        resultChip.style.height = '20px';
-        resultChip.style.textAlign = 'center';
-        resultChip.style.lineHeight = '20px';
-        resultChip.style.borderRadius = '50%';
-        resultChip.style.color = 'white';
-        resultChip.style.fontWeight = 'bold';
-        resultChip.style.fontSize = '12px';
-        
-        if (result === 'Banker') {
-            resultChip.style.backgroundColor = '#d9534f'; // Red
-        } else if (result === 'Player') {
-            resultChip.style.backgroundColor = '#428bca'; // Blue
-        } else {
-            resultChip.style.backgroundColor = '#5cb85c'; // Green
-        }
-        resultsContainer.appendChild(resultChip);
-    });
-
-    structuredView.appendChild(title);
-    structuredView.appendChild(rounds);
-    structuredView.appendChild(resultsContainer);
-    
-    // Add collapsible raw data view
-    const details = document.createElement('details');
-    details.style.marginTop = '10px';
-
-    const summary = document.createElement('summary');
-    summary.textContent = 'View Raw JSON';
-    summary.style.cursor = 'pointer';
-    summary.style.fontSize = '11px';
-    summary.style.color = '#aaa';
-
-    const rawJsonPre = document.createElement('pre');
-    rawJsonPre.textContent = JSON.stringify(rawMessage, null, 2);
-    
-    details.appendChild(summary);
-    details.appendChild(rawJsonPre);
-
-    logBody.appendChild(structuredView);
-    logBody.appendChild(details);
-
-    return logBody;
+function toggleDetails(tableId) {
+    const panel = document.getElementById(`details-${tableId}`);
+    const toggle = panel.previousElementSibling;
+    if (panel.classList.toggle('show')) {
+        toggle.textContent = 'Hide Details ▲';
+    } else {
+        toggle.textContent = 'Show Details ▼';
+    }
 }
 
 /**
- * Creates a DOM element for displaying a raw JSON message.
- * @param {object} message The raw message.
- * @returns {HTMLElement} The log body element.
+ * Creates a standard log entry wrapper for non-dashboard messages.
+ * @param {HTMLElement} bodyContent The pre-formatted content.
+ * @param {string} headerText The text for the log header.
+ * @returns {HTMLElement} A complete log entry element.
  */
-function createRawLogBody(message) {
-    const logBody = document.createElement('div');
-    logBody.className = 'log-body';
-    const messageElement = document.createElement('pre');
-    messageElement.textContent = JSON.stringify(message, null, 2);
-    logBody.appendChild(messageElement);
-    return logBody;
+function createLogEntry(bodyContent, headerText) {
+    const logEntry = document.createElement('div');
+    logEntry.className = 'card'; // Use card style for consistency
+    logEntry.innerHTML = `
+        <div class="card-header">${headerText}</div>
+        <div class="card-body"></div>
+    `;
+    logEntry.querySelector('.card-body').appendChild(bodyContent);
+    return logEntry;
 }
 
+// --- IPC Listeners ---
 
-window.addEventListener('DOMContentLoaded', () => {
-  const logContainer = document.getElementById('log-container');
-  const clearLogBtn = document.getElementById('clear-log-btn');
-  const autoscrollToggle = document.getElementById('autoscroll-toggle');
-  const statusIndicator = document.getElementById('connection-status');
-
-  // --- Event Listeners for Controls ---
-
-  clearLogBtn.addEventListener('click', () => {
-    logContainer.innerHTML = '';
-  });
-
-  // --- IPC Message Handlers ---
-
-  ipcRenderer.on('connection-status-changed', (event, status) => {
-    statusIndicator.className = ''; // Clear previous classes
-    switch (status) {
-      case 'connected':
-        statusIndicator.textContent = 'Connected';
-        statusIndicator.classList.add('status-connected');
-        break;
-      case 'disconnected':
-        statusIndicator.textContent = 'Disconnected (Waiting for data...)';
-        statusIndicator.classList.add('status-disconnected');
-        break;
-      case 'waiting':
-        statusIndicator.textContent = 'Waiting for Connection...';
-        statusIndicator.classList.add('status-waiting');
-        break;
-      case 'terminated':
-        statusIndicator.textContent = 'Connection Terminated';
-        break;
+window.electronAPI.onWsMessage((message) => {
+    if (message && message.type === 'strategy_update') {
+        createOrUpdateDashboardCard(message.payload);
+    } else {
+        // For other message types, append them as a simple log entry
+        const bodyContent = document.createElement('pre');
+        bodyContent.textContent = JSON.stringify(message, null, 2);
+        const logEntryElement = createLogEntry(bodyContent, `Log Message (${new Date().toLocaleTimeString()})`);
+        logContainer.appendChild(logEntryElement);
     }
-  });
+    
+    // ALWAYS scroll to the bottom after any message to ensure the latest content is visible.
+    logContainer.scrollTop = logContainer.scrollHeight;
+});
 
-  ipcRenderer.on('ws-message', (event, message) => {
-    try {
-      const logEntry = document.createElement('div');
-      logEntry.className = 'log-entry';
-
-      const logHeader = document.createElement('div');
-      logHeader.className = 'log-header';
-
-      const timestamp = document.createElement('span');
-      timestamp.className = 'timestamp';
-      timestamp.textContent = new Date().toLocaleTimeString();
-
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'copy-btn';
-      copyBtn.textContent = 'Copy';
-      copyBtn.addEventListener('click', () => {
-        navigator.clipboard.writeText(JSON.stringify(message, null, 2));
-        copyBtn.textContent = 'Copied!';
-        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1000);
-      });
-
-      logHeader.appendChild(timestamp);
-      logHeader.appendChild(copyBtn);
-      
-      // --- MODIFIED LOGIC ---
-      const structuredData = processWebSocketResponse(JSON.stringify(message));
-      let logBody;
-
-      if (structuredData) {
-        // If parsing is successful, show the structured view
-        logBody = createStructuredLogBody(structuredData, message);
-      } else {
-        // Otherwise, fall back to the raw JSON view
-        logBody = createRawLogBody(message);
-      }
-      // --- END OF MODIFIED LOGIC ---
-
-      logEntry.appendChild(logHeader);
-      logEntry.appendChild(logBody);
-
-      logContainer.appendChild(logEntry);
-
-      if (autoscrollToggle.checked) {
-        logContainer.scrollTop = logContainer.scrollHeight;
-      }
-
-    } catch (e) {
-      const errorElement = document.createElement('pre');
-      errorElement.style.color = 'red';
-      errorElement.textContent = `RENDERER ERROR:
-${e.stack}`;
-      logContainer.appendChild(errorElement);
+window.electronAPI.onConnectionStatusChanged((status) => {
+    if (connectionStatusSpan) {
+        connectionStatusSpan.textContent = status.toUpperCase();
+        connectionStatusSpan.className = `status-${status}`;
     }
-  });
 });

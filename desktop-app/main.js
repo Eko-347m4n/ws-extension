@@ -5,6 +5,7 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const log = require('electron-log');
+const fs = require('fs'); // Import the fs module
 
 // Configure logging to a file and disable console output to prevent EPIPE errors.
 log.transports.console.level = false;
@@ -49,7 +50,7 @@ function createWindow() {
     height: 600,
     webPreferences: {
       // The preload script runs in a privileged environment with access to Node.js APIs.
-      preload: path.join(__dirname, 'renderer.js')
+      preload: path.join(__dirname, 'preload.js')
     }
   });
   mainWindow.loadFile('index.html');
@@ -101,7 +102,10 @@ app.whenReady().then(() => {
   // Buffer to store incoming data from Chrome.
   let messageBuffer = Buffer.alloc(0);
 
-  process.stdin.on('data', (chunk) => {
+  const stdinStream = fs.createReadStream('/dev/stdin');
+
+  stdinStream.on('data', (chunk) => {
+    log.info(`[${new Date().toISOString()}] Raw data chunk received. Length: ${chunk.length}`);
     resetWatchdogTimer(); // Reset timer on any incoming data
 
     log.info(`Received data chunk of length: ${chunk.length}`);
@@ -130,19 +134,19 @@ app.whenReady().then(() => {
 
       try {
         const message = JSON.parse(messageContent.toString());
-        log.info('Successfully parsed message. Sending to renderer.');
+        log.info(`[${new Date().toISOString()}] Received message from Chrome: ${JSON.stringify(message)}`);
         if (mainWindow && !mainWindow.isDestroyed()) {
           // Send the parsed message to the renderer process for display.
           mainWindow.webContents.send('ws-message', message);
         }
       } catch (e) {
-        log.error('Failed to parse message:', e.message);
+        log.error(`[${new Date().toISOString()}] Failed to parse message:`, e.message);
         log.error('Problematic content as string:', messageContent.toString());
       }
     }
   });
 
-  process.stdin.on('end', () => {
+  stdinStream.on('end', () => {
     log.info('Stdin stream ended. Quitting app.');
     clearTimeout(watchdogTimer);
     updateConnectionState('terminated');
