@@ -7,7 +7,6 @@ let reconnectTimeout;
 let isCapturing = false;
 let autoConnectMode = false;
 let discoveredUrls = [];
-let nativePort = null;
 
 // --- State Management ---
 let shoeStates = {};
@@ -17,56 +16,10 @@ const COMMON_COOKIE_NAMES = ['session', 'sess', 'sid', 'token', 'auth', 'jwt', '
 
 // --- Core Functions ---
 
-function connectNative() {
-    const hostName = "org.gemini.web_socket_client";
-    console.log(`Attempting to connect to native host: ${hostName}`);
-    nativePort = chrome.runtime.connectNative(hostName);
-
-    if (chrome.runtime.lastError) {
-        console.error("Failed to connect to native host:", chrome.runtime.lastError.message);
-        nativePort = null;
-        return;
-    }
-
-    nativePort.onMessage.addListener((message) => {
-        console.log("Received from native host:", message);
-    });
-
-    nativePort.onDisconnect.addListener(() => {
-        console.error("Native host disconnected. Error:", chrome.runtime.lastError ? chrome.runtime.lastError.message : "No error message.");
-        nativePort = null; // Essential for reconnection logic
-    });
-    console.log("Successfully connected to native host.");
-}
-
 function sendMessageToPopup(message) {
     chrome.runtime.sendMessage(message).catch(e => {
         if (!e.message.includes("Receiving end does not exist")) console.error(e);
     });
-}
-
-function sendToNativeHost(message) {
-    // If port is not connected, try to reconnect it first.
-    if (!nativePort) {
-        console.log("Native port is not connected. Attempting to reconnect...");
-        connectNative();
-    }
-
-    // If the connection attempt was successful (or already was connected), send the message.
-    if (nativePort) {
-        try {
-            console.log("Payload ke host:", JSON.stringify(message)); // Tambah log payload
-            nativePort.postMessage(message);
-        } catch (e) {
-            console.error("Failed to send message to native host:", e);
-            // The port might have broken between the check and the postMessage call.
-            // Disconnect it fully to ensure the next call triggers a reconnect.
-            nativePort.disconnect();
-            nativePort = null;
-        }
-    } else {
-        console.error("Cannot send message: Native host connection is not available.");
-    }
 }
 
 function updateStatus(status, color) {
@@ -83,7 +36,6 @@ function disconnect() {
       ws.close();
       ws = null;
   }
-  if (nativePort) nativePort.disconnect();
   updateStatus("Disconnected", "#db4437");
 }
 
@@ -92,7 +44,6 @@ function connect() {
   if (reconnectTimeout) clearTimeout(reconnectTimeout);
   if (!config) { updateStatus("Config?", "#f4b400"); return; }
 
-  connectNative();
   updateStatus("Connecting...", "#4285f4");
 
   chrome.cookies.get({ url: config.targetUrl, name: config.cookieName }, (cookie) => {
@@ -104,7 +55,6 @@ function connect() {
       };
 
       ws.onmessage = (event) => {
-        console.log(`[${new Date().toISOString()}] Received raw WebSocket message.`);
         let data;
         try {
             data = JSON.parse(event.data);
@@ -117,11 +67,9 @@ function connect() {
         sendMessageToPopup({ type: "WS_MSG", data: data });
 
         if (data && typeof data.args === 'object') {
-            console.log(`[${new Date().toISOString()}] Message contains 'args' object. Processing tables.`);
             for (const tableId in data.args) {
                 const tableData = data.args[tableId];
                 if (tableId.toLowerCase().includes('bac') && tableData && Array.isArray(tableData.results)) {
-                    console.log(`[${new Date().toISOString()}] Found Baccarat data for table: ${tableId}`);
                     processBaccaratData(tableId, tableData);
                 }
             }
@@ -130,7 +78,6 @@ function connect() {
 
       ws.onclose = () => {
         ws = null;
-        if (nativePort) nativePort.disconnect();
         if (config) { 
             updateStatus("Reconnecting", "#f4b400"); 
             reconnectTimeout = setTimeout(connect, 5000); 
@@ -150,82 +97,53 @@ function connect() {
 }
 
 function processBaccaratData(tableId, tableData) {
-    const startTime = performance.now();
-    const currentRound = (shoeStates[tableId] && shoeStates[tableId].strategy) ? shoeStates[tableId].strategy.round + 1 : 1; // Estimate next round
-    console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - Starting processing.`);
-
     const results = tableData.results;
-    const prior = globalPriors[tableId] || { B: 1, P: 1, T: 1 };
-    const tempStrategy = new BaccaratStrategy({ initial_prior: prior });
-    const tempTracker = new PerformanceTracker();
+    if (!results || !Array.isArray(results)) {
+        return;
+    }
+
+    // Create a fresh, stateless strategy for each incoming message.
+    const strategy = new BaccaratStrategy({ initial_prior: globalPriors[tableId] || { B: 1, P: 1, T: 1 } });
     let lastDecisionLog = null;
 
-    // Process every outcome in the received list to rebuild the current state from scratch.
-    if (results && Array.isArray(results) && results.length > 0) {
-        for (const resultObject of results) {
-            const outcome = translateOutcome(resultObject);
-            if (outcome) {
-                lastDecisionLog = tempStrategy.addOutcome(outcome);
-                tempTracker.recordDecision(lastDecisionLog, outcome);
-            }
+    // Process the entire history provided in the message.
+    for (const resultObject of results) {
+        const outcome = translateOutcome(resultObject);
+        if (outcome) {
+            lastDecisionLog = strategy.addOutcome(outcome);
         }
-    } else {
-        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - No new results in this message.`);
     }
 
-
-    // Detect a new shoe by checking if the new round count is less than our stored one.
-    if (shoeStates[tableId] && shoeStates[tableId].strategy && tempStrategy.round < shoeStates[tableId].strategy.round) {
-        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - New shoe detected.`);
-        const summary = shoeStates[tableId].performanceTracker.getSummary();
-        sendToNativeHost({ type: 'shoe_summary', payload: summary });
-        const final_counts = shoeStates[tableId].strategy.counts;
-        // Update the global prior for the *next* shoe.
-        globalPriors[tableId] = { B: 1 + (final_counts.B * SHRINKAGE_FACTOR), P: 1 + (final_counts.P * SHRINKAGE_FACTOR), T: 1 + (final_counts.T * SHRINKAGE_FACTOR) };
-    }
-
-    // Initialize state if it doesn't exist
-    if (!shoeStates[tableId]) {
-        shoeStates[tableId] = {};
-    }
-
-    // Persist the newly calculated state for this table.
-    shoeStates[tableId].strategy = tempStrategy;
-    shoeStates[tableId].performanceTracker = tempTracker;
-    // Also persist the last valid log we generated for this table.
+    // If a valid decision log was produced from the results, log it to the console.
     if (lastDecisionLog) {
-        shoeStates[tableId].lastLog = lastDecisionLog;
-    }
+        try {
+            const { decision, confidence, round, net_profit, outcome } = lastDecisionLog;
+            if (decision) {
+                const isBet = decision.stake > 0;
+                const betOnSide = decision.betOn === 'B' ? 'BANKER' : (decision.betOn === 'P' ? 'PLAYER' : 'N/A');
+                
+                let actionText;
+                if (isBet) {
+                    actionText = `🟢 BET ${betOnSide} (${decision.stake} units)`;
+                } else {
+                    actionText = `🔴 NO BET`;
+                }
 
-    // Determine the log to send.
-    let finalLogPayload = null;
-    let messageType = 'strategy_no_data'; // Default to placeholder
+                const confidenceText = (confidence !== null && typeof confidence !== 'undefined') ? `${(confidence * 100).toFixed(1)}%` : 'N/A';
+                const profitText = (net_profit !== null && typeof net_profit !== 'undefined') ? `${net_profit.toFixed(2)} units` : 'N/A';
 
-    if (lastDecisionLog) {
-        // If new valid outcomes were processed, send the new log.
-        finalLogPayload = { ...lastDecisionLog, tableId };
-        messageType = 'strategy_update';
-    } else if (shoeStates[tableId] && shoeStates[tableId].lastLog) {
-        // If no new valid outcomes, but we have a previous valid log, re-send that.
-        // This ensures the UI stays updated with the last known good state.
-        finalLogPayload = { ...shoeStates[tableId].lastLog, tableId };
-        messageType = 'strategy_update';
-    } else {
-        // If no new valid outcomes and no previous valid log, send a placeholder.
-        finalLogPayload = { tableId: tableId, round: currentRound };
-        messageType = 'strategy_no_data';
-    }
-
-    if (finalLogPayload) { // Should always be true now
-        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${finalLogPayload.round || currentRound} - Sending ${messageType} to native host.`);
-        sendToNativeHost({ type: messageType, payload: finalLogPayload });
-    } else {
-        // This case should ideally not be reached with the new logic, but as a fallback.
-        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - No payload generated. This should not happen.`);
-    }
-
-    const endTime = performance.now();
-    console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - Finished processing in ${endTime - startTime}ms.`);
+                console.group(`[${new Date().toLocaleTimeString()}] Decision for ${tableId} (Round ${round || 'N/A'})`);
+                console.log(`%cAction: ${actionText}`, `font-weight:bold; font-size:13px; color: ${isBet ? '#2e7d32' : '#c62828'};`);
+                console.log(`Reason: ${decision.reason || 'N/A'}`);
+                console.log(`Confidence: ${confidenceText}`);
+                console.log(`Last Outcome: ${outcome || 'N/A'}`);
+                console.log(`Net Profit: ${profitText}`);
+                console.groupEnd();
+            }
+        } catch (e) {
+            console.error("Error logging strategy decision:", e, lastDecisionLog);
+        }
+    } 
 }
 
 function translateOutcome(resultObject) {
