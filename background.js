@@ -33,11 +33,7 @@ function connectNative() {
     });
 
     nativePort.onDisconnect.addListener(() => {
-        if (chrome.runtime.lastError) {
-            console.error("Native host disconnected with error:", chrome.runtime.lastError.message);
-        } else {
-            console.log("Native host disconnected gracefully.");
-        }
+        console.error("Native host disconnected. Error:", chrome.runtime.lastError ? chrome.runtime.lastError.message : "No error message.");
         nativePort = null; // Essential for reconnection logic
     });
     console.log("Successfully connected to native host.");
@@ -59,6 +55,7 @@ function sendToNativeHost(message) {
     // If the connection attempt was successful (or already was connected), send the message.
     if (nativePort) {
         try {
+            console.log("Payload ke host:", JSON.stringify(message)); // Tambah log payload
             nativePort.postMessage(message);
         } catch (e) {
             console.error("Failed to send message to native host:", e);
@@ -154,35 +151,32 @@ function connect() {
 
 function processBaccaratData(tableId, tableData) {
     const startTime = performance.now();
-    console.log(`[${new Date().toISOString()}] [${tableId}] Starting processing.`);
+    const currentRound = (shoeStates[tableId] && shoeStates[tableId].strategy) ? shoeStates[tableId].strategy.round + 1 : 1; // Estimate next round
+    console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - Starting processing.`);
 
     const results = tableData.results;
-    if (!results || !Array.isArray(results) || results.length === 0) {
-        console.log(`[${new Date().toISOString()}] [${tableId}] No results to process.`);
-        return; // Nothing to process
-    }
-
-    // To prevent getting stuck, this function treats each message as the current source of truth.
-    // It re-processes the entire list of results provided in the message each time.
-    // This is more robust against non-cumulative updates from the server.
-
     const prior = globalPriors[tableId] || { B: 1, P: 1, T: 1 };
     const tempStrategy = new BaccaratStrategy({ initial_prior: prior });
     const tempTracker = new PerformanceTracker();
     let lastDecisionLog = null;
 
     // Process every outcome in the received list to rebuild the current state from scratch.
-    for (const resultObject of results) {
-        const outcome = translateOutcome(resultObject);
-        if (outcome) {
-            lastDecisionLog = tempStrategy.addOutcome(outcome);
-            tempTracker.recordDecision(lastDecisionLog, outcome);
+    if (results && Array.isArray(results) && results.length > 0) {
+        for (const resultObject of results) {
+            const outcome = translateOutcome(resultObject);
+            if (outcome) {
+                lastDecisionLog = tempStrategy.addOutcome(outcome);
+                tempTracker.recordDecision(lastDecisionLog, outcome);
+            }
         }
+    } else {
+        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - No new results in this message.`);
     }
 
+
     // Detect a new shoe by checking if the new round count is less than our stored one.
-    if (shoeStates[tableId] && tempStrategy.round < shoeStates[tableId].strategy.round) {
-        console.log(`[${new Date().toISOString()}] [${tableId}] New shoe detected.`);
+    if (shoeStates[tableId] && shoeStates[tableId].strategy && tempStrategy.round < shoeStates[tableId].strategy.round) {
+        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - New shoe detected.`);
         const summary = shoeStates[tableId].performanceTracker.getSummary();
         sendToNativeHost({ type: 'shoe_summary', payload: summary });
         const final_counts = shoeStates[tableId].strategy.counts;
@@ -190,20 +184,48 @@ function processBaccaratData(tableId, tableData) {
         globalPriors[tableId] = { B: 1 + (final_counts.B * SHRINKAGE_FACTOR), P: 1 + (final_counts.P * SHRINKAGE_FACTOR), T: 1 + (final_counts.T * SHRINKAGE_FACTOR) };
     }
 
-    // Persist the newly calculated state for this table.
-    shoeStates[tableId] = {
-        strategy: tempStrategy,
-        performanceTracker: tempTracker
-    };
-
-    // Send the latest state to the UI, if any processing occurred.
-    if (lastDecisionLog) {
-        const payload = { ...lastDecisionLog, tableId };
-        console.log(`[${new Date().toISOString()}] [${tableId}] Sending strategy update to native host.`);
-        sendToNativeHost({ type: 'strategy_update', payload });
+    // Initialize state if it doesn't exist
+    if (!shoeStates[tableId]) {
+        shoeStates[tableId] = {};
     }
+
+    // Persist the newly calculated state for this table.
+    shoeStates[tableId].strategy = tempStrategy;
+    shoeStates[tableId].performanceTracker = tempTracker;
+    // Also persist the last valid log we generated for this table.
+    if (lastDecisionLog) {
+        shoeStates[tableId].lastLog = lastDecisionLog;
+    }
+
+    // Determine the log to send.
+    let finalLogPayload = null;
+    let messageType = 'strategy_no_data'; // Default to placeholder
+
+    if (lastDecisionLog) {
+        // If new valid outcomes were processed, send the new log.
+        finalLogPayload = { ...lastDecisionLog, tableId };
+        messageType = 'strategy_update';
+    } else if (shoeStates[tableId] && shoeStates[tableId].lastLog) {
+        // If no new valid outcomes, but we have a previous valid log, re-send that.
+        // This ensures the UI stays updated with the last known good state.
+        finalLogPayload = { ...shoeStates[tableId].lastLog, tableId };
+        messageType = 'strategy_update';
+    } else {
+        // If no new valid outcomes and no previous valid log, send a placeholder.
+        finalLogPayload = { tableId: tableId, round: currentRound };
+        messageType = 'strategy_no_data';
+    }
+
+    if (finalLogPayload) { // Should always be true now
+        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${finalLogPayload.round || currentRound} - Sending ${messageType} to native host.`);
+        sendToNativeHost({ type: messageType, payload: finalLogPayload });
+    } else {
+        // This case should ideally not be reached with the new logic, but as a fallback.
+        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - No payload generated. This should not happen.`);
+    }
+
     const endTime = performance.now();
-    console.log(`[${new Date().toISOString()}] [${tableId}] Finished processing in ${endTime - startTime}ms.`);
+    console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - Finished processing in ${endTime - startTime}ms.`);
 }
 
 function translateOutcome(resultObject) {

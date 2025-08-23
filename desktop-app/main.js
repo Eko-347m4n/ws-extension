@@ -5,7 +5,7 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const log = require('electron-log');
-const fs = require('fs'); // Import the fs module
+
 
 // Configure logging to a file and disable console output to prevent EPIPE errors.
 log.transports.console.level = false;
@@ -102,7 +102,7 @@ app.whenReady().then(() => {
   // Buffer to store incoming data from Chrome.
   let messageBuffer = Buffer.alloc(0);
 
-  const stdinStream = fs.createReadStream('/dev/stdin');
+  const stdinStream = process.stdin;
 
   stdinStream.on('data', (chunk) => {
     log.info(`[${new Date().toISOString()}] Raw data chunk received. Length: ${chunk.length}`);

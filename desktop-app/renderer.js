@@ -127,9 +127,86 @@ function createLogEntry(bodyContent, headerText) {
 
 // --- IPC Listeners ---
 
+/**
+ * Creates or updates a card for a table that has been detected but has no processable data yet.
+ * @param {object} payload The message payload, containing the tableId and round.
+ */
+function createOrUpdatePlaceholderCard(payload) {
+    const { tableId, round } = payload; // Added round
+    if (!tableId) return;
+
+    const cardId = 'table-' + tableId;
+    let card = document.getElementById(cardId);
+
+    // If a card for this table already shows full data, don't overwrite it with a placeholder.
+    // Only create a new card or update an existing placeholder.
+    if (card && card.querySelector('.details-toggle')) {
+        return;
+    }
+
+    if (!card) {
+        card = document.createElement('div');
+        card.id = cardId;
+        card.className = 'card';
+        logContainer.appendChild(card);
+    }
+
+    // Update the card's content to show a waiting/no-data state.
+    card.innerHTML = `
+        <div class="card-header">
+            <span>ROUND: ${round || 'N/A'}</span> <!-- Display round -->
+            <span>TABLE: ${tableId}</span>
+        </div>
+        <div class="card-body">
+            <div class="card-action bet-blocked">⚪ WAITING FOR DATA...</div>
+            <div class="metric">
+                <span>Confidence</span>
+                <div class="progress-bar">
+                    <div class="progress-bar-inner" style="width: 0%;"></div>
+                </div>
+                <span>N/A</span>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * Creates a card to display the shoe summary report.
+ * @param {string} summaryText The formatted summary text from PerformanceTracker.getSummary().
+ */
+function createShoeSummaryCard(summaryText) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+        <div class="card-header">SHOE SUMMARY REPORT (${new Date().toLocaleTimeString()})</div>
+        <div class="card-body">
+            <pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px;">${summaryText}</pre>
+        </div>
+    `;
+    logContainer.appendChild(card);
+}
+
 window.electronAPI.onWsMessage((message) => {
+    // DEBUG: Add a simple log entry for every message received
+    const debugLogEntry = document.createElement('div');
+    debugLogEntry.textContent = `Received message: ${JSON.stringify(message)}`;
+    logContainer.appendChild(debugLogEntry);
+
     if (message && message.type === 'strategy_update') {
         createOrUpdateDashboardCard(message.payload);
+    } else if (message && message.type === 'strategy_no_data') {
+        createOrUpdatePlaceholderCard(message.payload);
+    } else if (message && message.type === 'shoe_summary') {
+        createShoeSummaryCard(message.payload); // payload is the summary string
+    } else if (message && message.type === 'WS_MSG') {
+        const bodyContent = document.createElement('pre');
+        if (typeof message.data === 'object') {
+            bodyContent.textContent = JSON.stringify(message.data, null, 2);
+        } else {
+            bodyContent.textContent = message.data; // Raw string
+        }
+        const logEntryElement = createLogEntry(bodyContent, `Raw WebSocket Message (${new Date().toLocaleTimeString()})`);
+        logContainer.appendChild(logEntryElement);
     } else {
         // For other message types, append them as a simple log entry
         const bodyContent = document.createElement('pre');
