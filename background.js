@@ -136,7 +136,8 @@ function processBaccaratData(tableId, tableData) {
                 console.log(`%cAction: ${actionText}`, `font-weight:bold; font-size:13px; color: ${isBet ? '#2e7d32' : '#c62828'};`);
                 console.log(`Reason: ${decision.reason || 'N/A'}`);
                 console.log(`Confidence: ${confidenceText}`);
-                console.log(`Last Outcome: ${outcome || 'N/A'}`);
+                const lastFiveOutcomes = results.slice(-5).map(r => translateOutcome(r)).filter(o => o).join(', ');
+                console.log('Last 5 Outcomes:', lastFiveOutcomes || 'N/A');
                 console.log(`Net Profit: ${profitText}`);
                 console.groupEnd();
             }
