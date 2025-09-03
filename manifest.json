@@ -6,8 +6,7 @@
   "permissions": [
     "cookies",
     "storage",
-    "webRequest",
-    "nativeMessaging"
+    "webRequest"
   ],
   "host_permissions": [
     "<all_urls>"

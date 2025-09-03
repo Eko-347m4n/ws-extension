@@ -4,69 +4,24 @@ importScripts('statistics.js', 'performance.js', 'strategy.js');
 let ws;
 let config;
 let reconnectTimeout;
+let heartbeatTimeout;
 let isCapturing = false;
 let autoConnectMode = false;
 let discoveredUrls = [];
-let nativePort = null;
+let latestMessage = null;
+let isProcessing = false;
 
 // --- State Management ---
-let shoeStates = {};
 let globalPriors = {};
-const SHRINKAGE_FACTOR = 0.2;
+let tableStates = {}; // Holds the state (strategy, tracker, etc.) for each table
 const COMMON_COOKIE_NAMES = ['session', 'sess', 'sid', 'token', 'auth', 'jwt', 'id'];
 
 // --- Core Functions ---
-
-function connectNative() {
-    const hostName = "org.gemini.web_socket_client";
-    console.log(`Attempting to connect to native host: ${hostName}`);
-    nativePort = chrome.runtime.connectNative(hostName);
-
-    if (chrome.runtime.lastError) {
-        console.error("Failed to connect to native host:", chrome.runtime.lastError.message);
-        nativePort = null;
-        return;
-    }
-
-    nativePort.onMessage.addListener((message) => {
-        console.log("Received from native host:", message);
-    });
-
-    nativePort.onDisconnect.addListener(() => {
-        console.error("Native host disconnected. Error:", chrome.runtime.lastError ? chrome.runtime.lastError.message : "No error message.");
-        nativePort = null; // Essential for reconnection logic
-    });
-    console.log("Successfully connected to native host.");
-}
 
 function sendMessageToPopup(message) {
     chrome.runtime.sendMessage(message).catch(e => {
         if (!e.message.includes("Receiving end does not exist")) console.error(e);
     });
-}
-
-function sendToNativeHost(message) {
-    // If port is not connected, try to reconnect it first.
-    if (!nativePort) {
-        console.log("Native port is not connected. Attempting to reconnect...");
-        connectNative();
-    }
-
-    // If the connection attempt was successful (or already was connected), send the message.
-    if (nativePort) {
-        try {
-            console.log("Payload ke host:", JSON.stringify(message)); // Tambah log payload
-            nativePort.postMessage(message);
-        } catch (e) {
-            console.error("Failed to send message to native host:", e);
-            // The port might have broken between the check and the postMessage call.
-            // Disconnect it fully to ensure the next call triggers a reconnect.
-            nativePort.disconnect();
-            nativePort = null;
-        }
-    } else {
-        console.error("Cannot send message: Native host connection is not available.");
-    }
 }
 
 function updateStatus(status, color) {
@@ -77,14 +32,25 @@ function updateStatus(status, color) {
 
 function disconnect() {
   if (reconnectTimeout) clearTimeout(reconnectTimeout);
+  if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
   reconnectTimeout = null;
+  heartbeatTimeout = null;
   if (ws) {
       ws.onclose = null; // Prevent reconnect logic from firing on manual disconnect
       ws.close();
       ws = null;
   }
-  if (nativePort) nativePort.disconnect();
   updateStatus("Disconnected", "#db4437");
+}
+
+function resetHeartbeat() {
+  if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+  heartbeatTimeout = setTimeout(() => {
+    console.log("WebSocket heartbeat timeout after 30s. Reconnecting...");
+    if (ws) {
+      ws.close(); // This will trigger the onclose handler which contains the reconnect logic
+    }
+  }, 30000);
 }
 
 function connect() {
@@ -92,7 +58,6 @@ function connect() {
   if (reconnectTimeout) clearTimeout(reconnectTimeout);
   if (!config) { updateStatus("Config?", "#f4b400"); return; }
 
-  connectNative();
   updateStatus("Connecting...", "#4285f4");
 
   chrome.cookies.get({ url: config.targetUrl, name: config.cookieName }, (cookie) => {
@@ -101,10 +66,11 @@ function connect() {
 
       ws.onopen = () => {
           updateStatus("Connected", "#0f9d58");
+          resetHeartbeat();
       };
 
       ws.onmessage = (event) => {
-        console.log(`[${new Date().toISOString()}] Received raw WebSocket message.`);
+        resetHeartbeat();
         let data;
         try {
             data = JSON.parse(event.data);
@@ -113,27 +79,20 @@ function connect() {
             sendMessageToPopup({ type: "WS_MSG", data: event.data });
             return;
         }
+        
+        latestMessage = data; // Always store the latest message
 
-        sendMessageToPopup({ type: "WS_MSG", data: data });
-
-        if (data && typeof data.args === 'object') {
-            console.log(`[${new Date().toISOString()}] Message contains 'args' object. Processing tables.`);
-            for (const tableId in data.args) {
-                const tableData = data.args[tableId];
-                if (tableId.toLowerCase().includes('bac') && tableData && Array.isArray(tableData.results)) {
-                    console.log(`[${new Date().toISOString()}] Found Baccarat data for table: ${tableId}`);
-                    processBaccaratData(tableId, tableData);
-                }
-            }
+        if (!isProcessing) {
+            processLatestMessage();
         }
       };
 
       ws.onclose = () => {
+        if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
         ws = null;
-        if (nativePort) nativePort.disconnect();
         if (config) { 
             updateStatus("Reconnecting", "#f4b400"); 
-            reconnectTimeout = setTimeout(connect, 5000); 
+            reconnectTimeout = setTimeout(connect, 1500); 
         }
       };
 
@@ -149,83 +108,192 @@ function connect() {
   });
 }
 
-function processBaccaratData(tableId, tableData) {
-    const startTime = performance.now();
-    const currentRound = (shoeStates[tableId] && shoeStates[tableId].strategy) ? shoeStates[tableId].strategy.round + 1 : 1; // Estimate next round
-    console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - Starting processing.`);
+function processLatestMessage() {
+    if (isProcessing || !latestMessage) {
+        return;
+    }
 
-    const results = tableData.results;
-    const prior = globalPriors[tableId] || { B: 1, P: 1, T: 1 };
-    const tempStrategy = new BaccaratStrategy({ initial_prior: prior });
-    const tempTracker = new PerformanceTracker();
-    let lastDecisionLog = null;
+    isProcessing = true;
+    
+    const messageToProcess = latestMessage;
+    latestMessage = null; 
 
-    // Process every outcome in the received list to rebuild the current state from scratch.
-    if (results && Array.isArray(results) && results.length > 0) {
-        for (const resultObject of results) {
-            const outcome = translateOutcome(resultObject);
-            if (outcome) {
-                lastDecisionLog = tempStrategy.addOutcome(outcome);
-                tempTracker.recordDecision(lastDecisionLog, outcome);
+    try {
+        sendMessageToPopup({ type: "WS_MSG", data: messageToProcess });
+
+        if (messageToProcess && typeof messageToProcess.args === 'object') {
+            for (const tableId in messageToProcess.args) {
+                const tableData = messageToProcess.args[tableId];
+                if (tableId.toLowerCase().includes('bac') && tableData && Array.isArray(tableData.results)) {
+                    processBaccaratData(tableId, tableData);
+                }
             }
         }
-    } else {
-        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - No new results in this message.`);
+    } finally {
+        isProcessing = false;
+        if (latestMessage) {
+            setTimeout(processLatestMessage, 0); 
+        }
+    }
+}
+
+function logCalibrationData(logEntry) {
+    chrome.storage.local.get(['calibrationData'], (result) => {
+        let data = result.calibrationData || [];
+        data.push(logEntry);
+        // Keep only the last 1000 entries to prevent storage bloat
+        if (data.length > 1000) {
+            data = data.slice(data.length - 1000);
+        }
+        chrome.storage.local.set({ calibrationData: data });
+    });
+}
+
+function processBaccaratData(tableId, tableData) {
+    const results = tableData.results;
+    if (!results || !Array.isArray(results)) return;
+
+    let state = tableStates[tableId];
+    const currentRoundTotal = results.length;
+
+    // Initialize or Reset state if it's a new shoe
+    if (!state || (currentRoundTotal < state.lastRound && currentRoundTotal < 5)) {
+        if (state) { // A new shoe is starting for a table we were already tracking
+            // --- Log previous shoe's performance summary ---
+            if (state.tracker.relaxed_metrics.bets_made > 0) {
+                const { wins, losses, bets_made } = state.tracker.relaxed_metrics;
+                const winRate = (wins / bets_made * 100).toFixed(2);
+                const profit = state.tracker.net_profit_units;
+                const profitText = profit.toFixed(2);
+                const profitCss = 'font-weight: bold; color: ' + (profit >= 0 ? '#0f9d58' : '#db4437');
+
+                console.groupCollapsed(`%cShoe Performance Summary for ${tableId}`, 'color: #1a73e8; font-weight: bold;');
+                console.log(`Result: %c${wins}W - ${losses}L (${winRate}%)`);
+                console.log(`Total Bets: ${bets_made}`);
+                console.log(`Final Net Profit: %c${profitText} units`, profitCss);
+                if (state.tracker.bet_history && state.tracker.bet_history.length > 0) {
+                    console.log('--- Bet History ---');
+                    console.table(state.tracker.bet_history);
+                }
+                console.groupEnd();
+            }
+
+            console.log(`%cNew shoe detected for ${tableId}. Resetting strategy and saving learned priors.`, 'color: blue; font-weight: bold;');
+            const finalCounts = state.strategy.counts;
+            globalPriors[tableId] = finalCounts;
+            chrome.storage.local.set({ globalPriors: globalPriors });
+        }
+        
+        state = {
+            strategy: new BaccaratStrategy({ initial_prior: globalPriors[tableId] || { B: 1, P: 1, T: 1 } }),
+            tracker: new PerformanceTracker(),
+            lastRound: 0,
+            hasStopped: false, // Track if the strategy has issued a permanent stop
+        };
+        tableStates[tableId] = state;
     }
 
+    const newOutcomes = results.slice(state.lastRound);
+    if (newOutcomes.length === 0) return;
 
-    // Detect a new shoe by checking if the new round count is less than our stored one.
-    if (shoeStates[tableId] && shoeStates[tableId].strategy && tempStrategy.round < shoeStates[tableId].strategy.round) {
-        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - New shoe detected.`);
-        const summary = shoeStates[tableId].performanceTracker.getSummary();
-        sendToNativeHost({ type: 'shoe_summary', payload: summary });
-        const final_counts = shoeStates[tableId].strategy.counts;
-        // Update the global prior for the *next* shoe.
-        globalPriors[tableId] = { B: 1 + (final_counts.B * SHRINKAGE_FACTOR), P: 1 + (final_counts.P * SHRINKAGE_FACTOR), T: 1 + (final_counts.T * SHRINKAGE_FACTOR) };
+    let lastDecisionLog = state.strategy.current_decision_log;
+    let lastBetResult = null; // To hold the result of the last bet processed
+
+    for (const resultObject of newOutcomes) {
+        const outcome = translateOutcome(resultObject);
+        if (outcome) {
+            if (lastDecisionLog) { // Use the decision from *before* the outcome was known
+                state.tracker.recordDecision(lastDecisionLog, outcome);
+                
+                // If a bet was made, store its result to be logged later
+                if (lastDecisionLog.decision.stake > 0) {
+                    const isWin = lastDecisionLog.decision.betOn === outcome;
+                    lastBetResult = {
+                        round: lastDecisionLog.round,
+                        resultText: isWin ? 'WIN' : 'LOSE',
+                        color: isWin ? '#0f9d58' : '#db4437'
+                    };
+
+                    logCalibrationData({
+                        timestamp: Date.now(),
+                        tableId: tableId,
+                        confidence: lastDecisionLog.analysis.raw_confidence, // Use raw confidence
+                        win: isWin
+                    });
+                }
+            }
+            // Process the outcome and get the log for the *next* decision
+            lastDecisionLog = state.strategy.addOutcome(outcome);
+        }
     }
+    
+    state.lastRound = currentRoundTotal;
 
-    // Initialize state if it doesn't exist
-    if (!shoeStates[tableId]) {
-        shoeStates[tableId] = {};
-    }
-
-    // Persist the newly calculated state for this table.
-    shoeStates[tableId].strategy = tempStrategy;
-    shoeStates[tableId].performanceTracker = tempTracker;
-    // Also persist the last valid log we generated for this table.
     if (lastDecisionLog) {
-        shoeStates[tableId].lastLog = lastDecisionLog;
-    }
+        try {
+            const { decision, confidence, round, analysis } = lastDecisionLog;
 
-    // Determine the log to send.
-    let finalLogPayload = null;
-    let messageType = 'strategy_no_data'; // Default to placeholder
+            // Manage logging state for the table
+            let hasStopped = state.hasStopped || false;
+            if (hasStopped) return; // Don't log if already permanently stopped
 
-    if (lastDecisionLog) {
-        // If new valid outcomes were processed, send the new log.
-        finalLogPayload = { ...lastDecisionLog, tableId };
-        messageType = 'strategy_update';
-    } else if (shoeStates[tableId] && shoeStates[tableId].lastLog) {
-        // If no new valid outcomes, but we have a previous valid log, re-send that.
-        // This ensures the UI stays updated with the last known good state.
-        finalLogPayload = { ...shoeStates[tableId].lastLog, tableId };
-        messageType = 'strategy_update';
-    } else {
-        // If no new valid outcomes and no previous valid log, send a placeholder.
-        finalLogPayload = { tableId: tableId, round: currentRound };
-        messageType = 'strategy_no_data';
-    }
+            const isPermanentStop = decision.reason && decision.reason.startsWith('STOP:');
+            if (isPermanentStop) {
+                state.hasStopped = true; // Mark for future rounds, the current stop log will be the last.
+            }
 
-    if (finalLogPayload) { // Should always be true now
-        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${finalLogPayload.round || currentRound} - Sending ${messageType} to native host.`);
-        sendToNativeHost({ type: messageType, payload: finalLogPayload });
-    } else {
-        // This case should ideally not be reached with the new logic, but as a fallback.
-        console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - No payload generated. This should not happen.`);
-    }
+            // Only log from round 10 onwards
+            if (round < 10) return;
 
-    const endTime = performance.now();
-    console.log(`[${new Date().toISOString()}] [${tableId}] Round: ${currentRound} - Finished processing in ${endTime - startTime}ms.`);
+            if (decision) {
+                const isBet = decision.stake > 0;
+                const profit = state.tracker.net_profit_units;
+
+                // --- Build Log Message ---
+                const time = new Date().toLocaleTimeString('en-GB');
+                const title = `%c[${time}] ${tableId} | R${round}`;
+                const actionText = isBet ? `BET ${decision.betOn} ${decision.stake}u` : 'NO BET';
+                const action = isBet ? `%c${actionText} 🟢` : `%c${actionText} 🔴`;
+                const profitText = `| Profit: %c${profit.toFixed(2)}u`;
+
+                // Add the result of the previous bet if it exists
+                let lastBetLine = '';
+                let lastBetCss = [];
+                if (lastBetResult) {
+                    lastBetLine = `\nLast Bet (R${lastBetResult.round}): %c${lastBetResult.resultText}`;
+                    lastBetCss.push(`color: ${lastBetResult.color}; font-weight: bold;`);
+                }
+
+                const evText = `EV: ${analysis.ev_per_unit.toFixed(3)}`;
+                const confText = `Conf: ${(confidence * 100).toFixed(1)}%`;
+                const ensembleText = `Ensemble: ${analysis.ensemble_agrees ? '✅' : '❌'}`;
+                const secondaryLine = `%c${evText} | ${confText} | ${ensembleText}`;
+                
+                const reasonLine = `%c> ${decision.reason || 'N/A'}`;
+
+                // --- Define CSS Styles ---
+                const titleCss = 'color: #9e9e9e;'; // Grey
+                const betCss = 'color: #2e7d32; font-weight: bold;'; // Dark Green
+                const noBetCss = 'color: #c62828;'; // Dark Red
+                const profitCss = 'font-weight: bold; color: ' + (profit >= 0 ? '#0f9d58' : '#db4437');
+                const secondaryCss = 'color: #6c757d;'; // Muted Grey
+                const reasonCss = 'color: #4285f4; font-style: italic;'; // Blue
+
+                // --- Log to Console ---
+                console.log(
+                    `${title} ${action} ${profitText}${lastBetLine}\n${secondaryLine}\n${reasonLine}`,
+                    titleCss,
+                    isBet ? betCss : noBetCss,
+                    profitCss,
+                    ...lastBetCss, // Spread the array for the result color
+                    secondaryCss,
+                    reasonCss
+                );
+            }
+        } catch (e) {
+            console.error("Error logging strategy decision:", e, lastDecisionLog);
+        }
+    } 
 }
 
 function translateOutcome(resultObject) {
@@ -287,7 +355,7 @@ function stopCapture() {
 chrome.runtime.onMessage.addListener((message) => {
   switch (message.type) {
     case "CONNECT": if (ws) disconnect(); config = message.data; connect(); break;
-    case "DISCONNECT": config = null; disconnect(); break;
+    case "DISCONNECT": config = null; disconnect(); tableStates = {}; break; // Clear states on manual disconnect
     case "WS_SEND": if (ws && ws.readyState === WebSocket.OPEN) ws.send(message.data); else console.error("WS not connected."); break;
     case "GET_STATUS":
       if (isCapturing) updateStatus("Capturing...", "#ff6d00");
@@ -303,8 +371,11 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 function initialize() {
-  chrome.storage.local.get(['captureMode', 'autoConnectMode'], (result) => {
+  chrome.storage.local.get(['captureMode', 'autoConnectMode', 'globalPriors', 'calibrationData'], (result) => {
     autoConnectMode = !!result.autoConnectMode;
+    globalPriors = result.globalPriors || {};
+    console.log('Loaded global priors:', globalPriors);
+    console.log(`Loaded ${result.calibrationData ? result.calibrationData.length : 0} calibration data points.`);
     if (result.captureMode) startCapture();
   });
 }
